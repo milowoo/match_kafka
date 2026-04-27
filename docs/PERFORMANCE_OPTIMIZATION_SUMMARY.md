@@ -2,7 +2,7 @@
 
 ## 优化项目概述
 
-基于原 `/Users/corleywu/matching` 项目的性能优化，在当前 JDK 21 + Spring Boot 3.5.7 项目中实现了以下关键优化：
+项目的性能优化，在当前 JDK 21 + Spring Boot 3.5.7 项目中实现了以下关键优化：
 
 ## 1. BigDecimal → long 运算优化
 

@@ -1,6 +1,6 @@
 # 撮合服务 JDK 21 + Spring Boot 3.5.7 + Chronicle Queue 升级版
-
-本项目是基于原 `/Users/corleywu/matching` 项目升级到 JDK 21、Spring Boot 3.5.7 和 Chronicle Queue 的高性能版本。
+ 
+项目升级到 JDK 21、Spring Boot 3.5.7 和 Chronicle Queue 的高性能版本。
 
 ## 升级内容
 
