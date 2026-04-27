@@ -1,0 +1,190 @@
+syntax = "proto3";
+
+package com.matching.proto;
+
+option java_package = "com.matching.proto";
+option java_outer_classname = "MatchingProto";
+option java_multiple_files = false;
+
+// MatchResult - top-level message sent to Kafka and written to EventLog
+message PbMatchResult {
+  string symbol_id = 1;
+  repeated PbMatchDealtResult dealt_records = 2;
+  repeated PbMatchOrderResult dealt_orders = 3;
+  repeated PbMatchCreateOrderResult create_orders = 4;
+}
+
+message PbMatchDealtResult {
+  int64 record_id = 1;
+  int64 order_id = 2;
+  string business_line = 3;
+  string second_business_line = 4;
+  int64 account_id = 5;
+  string token_id = 6;
+  string symbol_id = 7;
+  string delegate_type = 8;
+  string order_type = 9;
+  string dealt_count = 10;      // BigDecimal as string for precision
+  string dealt_amount = 11;
+  string dealt_price = 12;
+  string taker_maker_flag = 13;
+  int64 target_account_id = 14;
+  int64 target_record_id = 15;
+  int64 create_time = 16;       // epoch millis
+  bool is_market_order = 17;
+  bool is_target_market_order = 18;
+  int64 split_account_id = 19;
+  int32 margin_type = 20;
+  int64 uid = 21;
+  int64 target_uid = 22;
+}
+
+message PbMatchOrderResult {
+  int64 order_id = 1;
+  int64 account_id = 2;
+  string business_line = 3;
+  string second_business_line = 4;
+  string token_id = 5;
+  string symbol_id = 6;
+  string dealt_count = 7;
+  string remain_count = 8;
+  string remain_amount = 9;
+  string status = 10;
+  string cancel_reason = 11;
+  string params = 12;
+  int64 update_time = 13;
+  int32 control_value = 14;
+  int64 uid = 15;
+}
+
+message PbMatchCreateOrderResult {
+  int64 id = 1;
+  int64 account_id = 2;
+  string second_business_line = 3;
+  string token_id = 4;
+  string symbol_id = 5;
+  string delegate_type = 6;
+  string order_type = 7;
+  int32 control_value = 8;
+  string delegate_count = 9;
+  string delegate_amount = 10;
+  string delegate_price = 11;
+  string dealt_count = 12;
+  string dealt_amount = 13;
+  string average_deal_price = 14;
+  string status = 15;
+  string cancel_reason = 16;
+  string business_source = 17;
+  string enter_point_source = 18;
+  int64 create_time = 19;
+  int64 update_time = 20;
+  string params = 21;
+  int64 version = 22;
+  int64 uid = 23;
+}
+
+// Depth update - sent to Kafka depth topic
+message PbDepthUpdate {
+  string symbol_id = 1;
+  string type = 2;               // SNAPSHOT or INCREMENTAL
+  repeated PbPriceLevel bids = 3;
+  repeated PbPriceLevel asks = 4;
+  int64 timestamp = 5;
+}
+
+message PbPriceLevel {
+  string price = 1;
+  string quantity = 2;
+  int32 order_count = 3;
+}
+
+// ===================== Kafka Consumer Input =====================
+message PbTradeCommand {
+  string type = 1;              // PLACE_ORDER or CANCEL_ORDER
+  bytes payload = 2;             // serialized PbPlaceOrderParam or PbCancelOrderParam
+}
+
+message PbPlaceOrderParam {
+  int64 request_time = 1;
+  string business_line = 2;
+  string second_business_line = 3;
+  int64 account_id = 4;
+  string token_id = 5;
+  string symbol_id = 6;
+  string open_price = 7;
+  bool symbol_open = 8;
+  repeated PbPlaceMiniOrderParam order_list = 9;
+  int64 uid = 10;
+}
+
+message PbPlaceMiniOrderParam {
+  int64 order_no = 1;
+  string delegate_type = 2;
+  string order_type = 3;
+  string delegate_count = 4;
+  string delegate_amount = 5;
+  string delegate_price = 6;
+  int32 control_value = 7;
+  string business_source = 8;
+  string enter_point_source = 9;
+  int64 create_time = 10;
+  string params = 11;
+  string delegate_leverage = 12;
+  string cancel_reason = 13;
+  bool vip = 14;
+  bool is_iceberg = 15;
+  string iceberg_total_quantity = 16;
+  string iceberg_display_quantity = 17;
+  string iceberg_refresh_quantity = 18;
+}
+
+message PbCancelOrderParam {
+  string symbol_id = 1;
+  repeated string order_ids = 2;
+  int64 account_id = 3;
+  bool cancel_all = 4;
+  int64 uid = 5;              // 用户级别，一个用户可以有多个账户 (accountId)
+}
+
+// EventLog event - written to WAL file
+message PbEventLogEntry {
+  int64 seq = 1;
+  string symbol_id = 2;
+  repeated PbOrderBookEntry added_orders = 3;
+  repeated string removed_order_ids = 4;
+  repeated PbMatchResultEntry match_results = 5;
+}
+
+message PbOrderBookEntry {
+  string client_order_id = 1;
+  int64 account_id = 2;
+  string symbol_id = 3;
+  string side = 4;
+  string price = 5;
+  string quantity = 6;
+  string remaining_quantity = 7;
+  int64 request_time = 8;
+  bool vip = 9;
+  bool is_iceberg = 10;
+  string iceberg_total_quantity = 11;
+  string iceberg_display_quantity = 12;
+  string iceberg_hidden_quantity = 13;
+  string iceberg_refresh_quantity = 14;
+}
+
+message PbMatchResultEntry {
+  string account_key = 1;
+  bytes payload = 2;              // serialized PbMatchResult
+}
+
+message PbSnapshot {
+  int64 seq = 1;
+  string symbol_id = 2;
+  repeated PbOrderBookEntry all_orders = 3;
+}
+
+// EventLog batch - multiple events in one write
+message PbEventLogBatch {
+  repeated PbEventLogEntry events = 1;
+  int64 batch_timestamp = 2;
+}
