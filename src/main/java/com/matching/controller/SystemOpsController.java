@@ -1,6 +1,5 @@
 package com.matching.controller;
 
-import com.matching.service.ChronicleQueueVersionService;
 import com.matching.service.GracefulShutdownService;
 import com.matching.util.ThreadFactoryManager;
 import lombok.extern.slf4j.Slf4j;
@@ -17,32 +16,9 @@ import static com.matching.controller.OpsResponseBuilder.*;
 public class SystemOpsController {
 
     private final GracefulShutdownService gracefulShutdownService;
-    private final ChronicleQueueVersionService versionService;
 
-    public SystemOpsController(GracefulShutdownService gracefulShutdownService,
-                               ChronicleQueueVersionService versionService) {
+    public SystemOpsController(GracefulShutdownService gracefulShutdownService) {
         this.gracefulShutdownService = gracefulShutdownService;
-        this.versionService = versionService;
-    }
-
-    @GetMapping("/version")
-    public ResponseEntity<Map<String, Object>> getVersionInfo() {
-        try {
-            var info = versionService.getVersionInfo();
-            Map<String, Object> resp = map();
-            resp.put("chronicleQueue", Map.of(
-                    "currentVersion", info.currentVersion,
-                    "versionStatus", info.status.toString(),
-                    "message", info.message,
-                    "minStableVersion", info.minStableVersion,
-                    "maxTestedVersion", info.maxTestedVersion,
-                    "isStable", info.status == ChronicleQueueVersionService.VersionStatus.STABLE
-            ));
-            return ok(resp);
-        } catch (Exception e) {
-            log.error("Failed to get version info", e);
-            return error("Failed to get version info: " + e.getMessage());
-        }
     }
 
     @GetMapping("/threads")

@@ -150,7 +150,7 @@ class HAAutoRecoverTest {
     // ==================== Helpers ====================
 
     private HAService createHAService(String instanceId) {
-        ChronicleQueueEventLog cqEventLog = mock(ChronicleQueueEventLog.class);
+        UnifiedChronicleQueueEventLog cqEventLog = mock(UnifiedChronicleQueueEventLog.class);
         FastRecoveryService recoveryService = mock(FastRecoveryService.class);
         SymbolConfigService symbolConfigService = mock(SymbolConfigService.class);
         KafkaConsumerStartupService kafkaConsumerStartupService = mock(KafkaConsumerStartupService.class);
@@ -172,7 +172,7 @@ class HAAutoRecoverTest {
     }
 
     private HAService createHAServiceWithEmptySymbols(String instanceId) {
-        ChronicleQueueEventLog cqEventLog = mock(ChronicleQueueEventLog.class);
+        UnifiedChronicleQueueEventLog cqEventLog = mock(UnifiedChronicleQueueEventLog.class);
         FastRecoveryService recoveryService = mock(FastRecoveryService.class);
         SymbolConfigService symbolConfigService = mock(SymbolConfigService.class);
         KafkaConsumerStartupService kafkaConsumerStartupService = mock(KafkaConsumerStartupService.class);

@@ -66,7 +66,7 @@ public FastRecoveryService(EventLog eventLog, ...)
 **改动：**
 ```java
 // 改前
-import com.matching.service.ChronicleQueueEventLog;
+com.matching.service.ChronicleQueueEventLog;
 if (eventLog instanceof ChronicleQueueEventLog cqEventLog) {
     var factoryStatus = cqEventLog.getFactoryStatus();
     ...
@@ -88,7 +88,7 @@ if (eventLog instanceof UnifiedChronicleQueueEventLog unifiedEventLog) {
 **改动：**
 ```java
 // 改前
-import com.matching.service.ChronicleQueueEventLog;
+com.matching.service.ChronicleQueueEventLog;
 if (eventLog instanceof ChronicleQueueEventLog) {
     var factoryStatus = cqEventLog.getFactoryStatus();
     isActive = factoryStatus.symbolStatus.values().stream()

@@ -48,7 +48,6 @@ import static org.mockito.Mockito.*;
         "spring.profiles.active=test"
 })
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
-@org.springframework.context.annotation.Import(com.matching.config.TestChronicleQueueConfig.class)
 public class MatchResultConsumerTest {
 
     private static final String TRADE_TOPIC = "TRADE_TOP_SYMBOL";

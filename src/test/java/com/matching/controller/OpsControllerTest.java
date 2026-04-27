@@ -4,7 +4,7 @@ import com.matching.config.symbol.SymbolConfig;
 import com.matching.config.symbol.SymbolConfigService;
 import com.matching.dto.ApiResult;
 import com.matching.engine.MatchEngine;
-import com.matching.service.ChronicleQueueEventLog;
+import com.matching.service.UnifiedChronicleQueueEventLog;
 import com.matching.service.EventLog;
 import com.matching.service.HAService;
 import com.matching.service.OrderBookService;
@@ -172,14 +172,8 @@ public class OpsControllerTest {
     @Test
     @DisplayName("9. 获取实例信息")
     void testInstanceInfo() throws Exception {
-        ChronicleQueueEventLog mockCqEventLog = mock(ChronicleQueueEventLog.class);
-        com.matching.service.chronicle.ChronicleQueueFactory.FactoryStatus factoryStatus =
-                new com.matching.service.chronicle.ChronicleQueueFactory.FactoryStatus();
-        factoryStatus.symbolStatus = new HashMap<>();
-        factoryStatus.symbolStatus.put(SYMBOL,
-                new com.matching.service.chronicle.ChronicleQueueFactory.SymbolStatus(
-                        SYMBOL, "PRIMARY", "ACTIVE", false));
-        when(mockCqEventLog.getFactoryStatus()).thenReturn(factoryStatus);
+        UnifiedChronicleQueueEventLog mockCqEventLog = mock(UnifiedChronicleQueueEventLog.class);
+        when(mockCqEventLog.getRole(null)).thenReturn("PRIMARY");
 
         OpsController testController = new OpsController(
                 orderBookService, symbolConfigService, redisTemplate, mockCqEventLog, haService);

@@ -295,7 +295,7 @@ class HARollingUpgradeTest {
 
     private HAService createHAService(String instanceId) {
         StringRedisTemplate rt = mock(StringRedisTemplate.class);
-        ChronicleQueueEventLog cqEvtLog = mock(ChronicleQueueEventLog.class);
+        UnifiedChronicleQueueEventLog cqEvtLog = mock(UnifiedChronicleQueueEventLog.class);
         FastRecoveryService recoveryService = mock(FastRecoveryService.class);
         SymbolConfigService symbolConfigService = mock(SymbolConfigService.class);
         KafkaConsumerStartupService kafkaConsumerStartupService = mock(KafkaConsumerStartupService.class);

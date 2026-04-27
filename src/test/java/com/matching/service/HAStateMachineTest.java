@@ -282,7 +282,7 @@ class HAStateMachineTest {
     // ==================== Helpers ====================
 
     private HAService createHAService(String instanceId, boolean haEnabled, boolean kafkaSuccess) {
-        ChronicleQueueEventLog cqEventLog = mock(ChronicleQueueEventLog.class);
+        UnifiedChronicleQueueEventLog cqEventLog = mock(UnifiedChronicleQueueEventLog.class);
         FastRecoveryService recoveryService = mock(FastRecoveryService.class);
         SymbolConfigService symbolConfigService = mock(SymbolConfigService.class);
         KafkaConsumerStartupService kafkaService = mock(KafkaConsumerStartupService.class);
@@ -305,7 +305,7 @@ class HAStateMachineTest {
     }
 
     private HAService createHAServiceWithSlowKafka(String instanceId) {
-        ChronicleQueueEventLog cqEventLog = mock(ChronicleQueueEventLog.class);
+        UnifiedChronicleQueueEventLog cqEventLog = mock(UnifiedChronicleQueueEventLog.class);
         FastRecoveryService recoveryService = mock(FastRecoveryService.class);
         SymbolConfigService symbolConfigService = mock(SymbolConfigService.class);
         KafkaConsumerStartupService kafkaService = mock(KafkaConsumerStartupService.class);
@@ -331,7 +331,7 @@ class HAStateMachineTest {
     }
 
     private HAService createHAServiceWithSnapshotFailure(String instanceId) {
-        ChronicleQueueEventLog cqEventLog = mock(ChronicleQueueEventLog.class);
+        UnifiedChronicleQueueEventLog cqEventLog = mock(UnifiedChronicleQueueEventLog.class);
         FastRecoveryService recoveryService = mock(FastRecoveryService.class);
         SymbolConfigService symbolConfigService = mock(SymbolConfigService.class);
         KafkaConsumerStartupService kafkaService = mock(KafkaConsumerStartupService.class);
