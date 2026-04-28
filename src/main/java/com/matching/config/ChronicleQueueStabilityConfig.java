@@ -120,34 +120,4 @@ public class ChronicleQueueStabilityConfig {
                 preallocationSizeMB, maxFileSizeMB
         );
     }
-
-    /**
-     * 验证配置合理性
-     */
-    public boolean validateConfiguration() {
-        boolean valid = true;
-
-        if (preallocationSizeMB <= 0 || preallocationSizeMB > 1024) {
-            log.error("预分配大小配置不合理: {}MB (建议: 64-1024MB)", preallocationSizeMB);
-            valid = false;
-        }
-
-        if (maxFileSizeMB <= preallocationSizeMB) {
-            log.error("最大文件大小必须大于预分配大小: max={}MB, prealloc={}MB",
-                    maxFileSizeMB, preallocationSizeMB);
-            valid = false;
-        }
-
-        if (syncIntervalMs <= 0 || syncIntervalMs > 60000) {
-            log.error("同步间隔配置不合理: {}ms (建议: 100-60000ms)", syncIntervalMs);
-            valid = false;
-        }
-
-        if (memoryMappingSizeMB <= 0 || memoryMappingSizeMB > 2048) {
-            log.error("内存映射大小配置不合理: {}MB (建议: 64-2048MB)", memoryMappingSizeMB);
-            valid = false;
-        }
-
-        return valid;
-    }
 }

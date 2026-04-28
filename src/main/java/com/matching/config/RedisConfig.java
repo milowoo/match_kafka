@@ -144,9 +144,6 @@ public class RedisConfig {
             log.info("[Redis] Cluster authentication configured");
         }
 
-        // 集群模式的额外配置
-        // clusterConfig.setClusterTimeout(Duration.ofMillis(5000)); // 这个方法在当前版本中不存在
-
         log.info("[Redis] Cluster config - maxRedirects: {}", maxRedirects);
         return new JedisConnectionFactory(clusterConfig, clientConfig);
     }

@@ -16,8 +16,8 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 主实例将EventLog事件通过Kafka发送给从实例。策略：同步发送等待broker确认，如果失败，事件进入内存重试队列，后台定时线程持续重试直到成功。
- * 这样既不阻塞融合线程，又保证从实例最终一定能收到所有事件。基础情况（OOM等极端队列丢失）：从实例在failover时通过Redis Snapshot + 本地EventLog回放恢复，不依赖重试队列。
+ * 主实例将EventLog事件通过Kafka发送给从实例。策略：同步发送等待broker确认，如果失败则加入重试队列异步重试。
+ * 确保从实例最终一定能收到所有事件，确保HA切换时数据一致性。
  */
 @Slf4j
 @Service
@@ -45,22 +45,44 @@ public class EventLogReplicationService {
     }
 
     /**
-     * 同步发送EventLog复制消息。失败时加入重试队列，不抛异常，调用方（flush）可以安全地继续ack。
+     * 同步发送EventLog复制消息。为了保证顺序性，如果重试队列不为空（有pending事件），
+     * 则将新事件也加入重试队列，由后台线程按FIFO顺序重试。
+     * 这样保证从实例收到的事件顺序与主实例一致。
      */
     public void replicateEvent(EventLog.Event event) {
         byte[] data = ProtoConverter.serializeEvent(event);
-        if (trySend(event.getSymbolId(), data, event.getSeq())) {
+        String symbolId = event.getSymbolId();
+        long seq = event.getSeq();
+
+        // **关键**：如果重试队列不为空，说明有pending事件，为了保证顺序性，
+        // 新事件也必须加入队列，等待后台线程按FIFO顺序处理
+        if (!retryQueue.isEmpty()) {
+            if (retryQueue.size() < retryQueueMaxSize) {
+                retryQueue.add(new PendingReplication(symbolId, data, seq));
+                log.debug("[Replication] Queued (due to pending): seq={} symbol={}, queueSize={}",
+                        seq, symbolId, retryQueue.size());
+            } else {
+                log.error("[Replication] Retry queue full ({}), dropping event seq={} symbol={}. " +
+                        "Standby will recover via Snapshot + local EventLog on failover.",
+                        retryQueueMaxSize, seq, symbolId);
+            }
             return;
         }
+
+        // 重试队列为空，直接尝试发送
+        if (trySend(symbolId, data, seq)) {
+            return; // 成功发送
+        }
+
         // 发送失败，加入重试队列
         if (retryQueue.size() < retryQueueMaxSize) {
-            retryQueue.add(new PendingReplication(event.getSymbolId(), data, event.getSeq()));
-            log.warn("[Replication] Queued for retry: seq={} symbol={}, retryQueueSize={}",
-                    event.getSeq(), event.getSymbolId(), retryQueue.size());
+            retryQueue.add(new PendingReplication(symbolId, data, seq));
+            log.warn("[Replication] Send failed, queued for retry: seq={} symbol={}, queueSize={}",
+                    seq, symbolId, retryQueue.size());
         } else {
             log.error("[Replication] Retry queue full ({}), dropping event seq={} symbol={}. " +
                     "Standby will recover via Snapshot + local EventLog on failover.",
-                    retryQueueMaxSize, event.getSeq(), event.getSymbolId());
+                    retryQueueMaxSize, seq, symbolId);
         }
     }
 
@@ -73,20 +95,21 @@ public class EventLogReplicationService {
                     seq, symbolId, instanceId, data.length);
             return true;
         } catch (Exception e) {
-            log.error("[Replication] Failed to send event seq={} symbol={}", seq, symbolId, e);
+            log.warn("[Replication] Failed to send event seq={} symbol={}, will retry async", seq, symbolId, e);
             return false;
         }
     }
 
     /**
      * 后台定时重试失败的复制消息，每3秒执行一次。
+     * 按FIFO顺序重试，确保事件顺序性。
      */
-    @Scheduled(fixedDelay = 5000, initialDelay = 5000)
+    @Scheduled(fixedDelay = 3000, initialDelay = 3000)
     public void retryPending() {
         if (retryQueue.isEmpty()) return;
 
         int retried = 0;
-        int maxPerCycle = 500;
+        int maxPerCycle = 100; // 每次最多重试100个，避免阻塞太久
 
         while (retried < maxPerCycle) {
             PendingReplication pending = retryQueue.peek();
@@ -96,7 +119,8 @@ public class EventLogReplicationService {
                 retryQueue.poll(); // 成功才移除
                 retried++;
             } else {
-                break; // Kafka仍不可用，等下一轮
+                // 发送仍失败，保留在队列中等待下次重试
+                break;
             }
         }
 

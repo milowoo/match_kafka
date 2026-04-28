@@ -68,6 +68,8 @@ class HARollingUpgradeTest {
         replicationServiceA = new EventLogReplicationService(kafkaTemplateA);
         setField(replicationServiceA, "eventlogSyncTopic", "MATCHING_EVENTLOG_SYNC");
         setField(replicationServiceA, "instanceId", "node-A");
+        setField(replicationServiceA, "sendTimeoutMs", 5000L);
+        setField(replicationServiceA, "maxRetries", 10);
 
         doAnswer(inv -> {
             kafkaChannel.add(inv.getArgument(0));

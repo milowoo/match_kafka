@@ -36,10 +36,7 @@ public class SnapshotService {
             allOrders.add(e.toEntry(symbolId));
         }
 
-        // 先写本地EventLog的Snapshot，确保一致性
-        eventLog.writeSnapshot(symbolId, seq, allOrders);
-
-        // 再写Redis Snapshot，并记录LastSentSeq
+        // 只写Redis Snapshot用于HA failover，移除本地EventLog snapshot写入
         writeSnapshotToRedis(symbolId, seq, allOrders);
 
         // 更新LastSentSeq保证一致性
