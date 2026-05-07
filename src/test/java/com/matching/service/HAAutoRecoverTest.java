@@ -162,6 +162,8 @@ class HAAutoRecoverTest {
         // 默认 activate 成功
         when(symbolConfigService.getActiveSymbolIds()).thenReturn(java.util.Collections.emptyList());
         when(kafkaConsumerStartupService.startConsumers()).thenReturn(true);
+        when(eventLogReplicationSender.waitForKafkaReady(anyLong())).thenReturn(true);
+        when(eventLogReplicationSender.isRetryQueueEmpty()).thenReturn(true);
 
         HAService ha = new HAService(redisTemplate, cqEventLog, recoveryService, symbolConfigService,
                 kafkaConsumerStartupService, snapshotService, orderBookService, leaderElection, eventLogReplicationSender);

@@ -312,6 +312,16 @@ class EventLogReplicationSeqConsistencyTest {
         }
 
         @Override
+        public List<Event> readEventsInRange(long fromSeq, long toSeq) {
+            synchronized (mockEvents) {
+                return mockEvents.stream()
+                    .filter(e -> e.getSeq() >= fromSeq && e.getSeq() <= toSeq)
+                    .sorted(java.util.Comparator.comparingLong(Event::getSeq))
+                    .collect(java.util.stream.Collectors.toList());
+            }
+        }
+
+        @Override
         public Event readEventBySeq(long seq) {
             synchronized (mockEvents) {
                 return mockEvents.stream()

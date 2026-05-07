@@ -6,11 +6,8 @@ import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
-import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
-import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.*;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -21,6 +18,8 @@ import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.kafka.core.DefaultKafkaConsumerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.test.context.EmbeddedKafka;
+import org.springframework.kafka.test.EmbeddedKafkaBroker;
 import org.springframework.test.context.TestPropertySource;
 
 import java.math.BigDecimal;
@@ -28,12 +27,18 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 @SpringBootTest
+@EmbeddedKafka(
+    partitions = 1,
+    topics = { "TRADE_TOP_SYMBOL", "TRADE_MATCH_RESULT" },
+    bootstrapServersProperty = "spring.kafka.bootstrap-servers"
+)
 @TestPropertySource(properties = {
         "matching.ha.enabled=false",
         "matching.ha.role=PRIMARY",
@@ -49,6 +54,13 @@ import static org.mockito.Mockito.*;
 })
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 public class MatchResultConsumerTest {
+
+    private static final java.util.concurrent.atomic.AtomicLong orderNoCounter = new java.util.concurrent.atomic.AtomicLong(10001);
+
+    private static long nextOrderNo() {
+        return orderNoCounter.getAndIncrement();
+    }
+
 
     private static final String TRADE_TOPIC = "TRADE_TOP_SYMBOL";
     private static final String RESULT_TOPIC = "TRADE_MATCH_RESULT";
@@ -69,6 +81,9 @@ public class MatchResultConsumerTest {
     @Autowired
     private com.matching.service.HAService haService;
 
+    @Autowired
+    private EmbeddedKafkaBroker embeddedKafka;
+
     @MockBean
     private StringRedisTemplate redisTemplate;
 
@@ -88,7 +103,7 @@ public class MatchResultConsumerTest {
         // 重建 resultConsumer，确保连接到正确的 embedded broker
         if (resultConsumer == null) {
             Map<String, Object> consumerProps = new HashMap<>();
-            consumerProps.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+            consumerProps.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, embeddedKafka.getBrokersAsString());
             consumerProps.put(ConsumerConfig.GROUP_ID_CONFIG, "result-test-group-" + System.currentTimeMillis());
             consumerProps.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
             consumerProps.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class);
@@ -168,7 +183,17 @@ public class MatchResultConsumerTest {
                 });
             }
         }
-        Files.createDirectories(eventLogDir);
+        // 清理应用层 EventLog，避免跨测试运行的重复订单号冲突
+	    Path appEventLogDir = Path.of("/tmp/matching/eventlog-queue");
+	    if (Files.exists(appEventLogDir)) {
+	        try (var stream = Files.walk(appEventLogDir).sorted(Comparator.reverseOrder())) {
+	            stream.forEach(path -> {
+	                try { Files.deleteIfExists(path); } catch (Exception ignored) {}
+	            });
+	        }
+	    }
+	    Files.createDirectories(eventLogDir);
+        // 确保 Kafka topics 存在
         Files.createDirectories(eventLogDir.resolve("outbox"));
 
         // testProducer 在 @BeforeEach 里通过 injectedKafkaTemplate 赋值
@@ -176,14 +201,16 @@ public class MatchResultConsumerTest {
         // resultConsumer 在 @BeforeEach 里初始化
     }
 
+
     @AfterAll
     static void teardown() {
         if (resultConsumer != null) resultConsumer.close();
+        System.clearProperty("spring.kafka.bootstrap-servers");
     }
 
     private void warmupSymbol(String symbolId) throws Exception {
         ensureKafkaConsumerRunning();
-        sendPlaceOrder(99999L, 99999L, symbolId, "BUY_IN_SINGLE_SIDE_MODE", "LIMIT", "1.00", "0.001");
+        sendPlaceOrder(nextOrderNo(), nextOrderNo(), symbolId, "BUY_IN_SINGLE_SIDE_MODE", "LIMIT", "1.00", "0.001");
         Thread.sleep(2000);
         consumeResults(Duration.ofSeconds(3));
     }
@@ -208,7 +235,7 @@ public class MatchResultConsumerTest {
     @DisplayName("Limit order placed - result should contain createOrder with PENDING status")
     void testInitOrderCreateResult() throws Exception {
         warmupSymbol(SYMBOL);
-        long orderNo = 10001L, accountId = 100L;
+        long orderNo = nextOrderNo(), accountId = 100L;
         sendPlaceOrder(orderNo, accountId, SYMBOL, "BUY_IN_SINGLE_SIDE_MODE", "LIMIT", "3000.00", "2.0");
 
         List<MatchResult> results = consumeResults(Duration.ofSeconds(15));
@@ -226,7 +253,7 @@ public class MatchResultConsumerTest {
     @Test @Order(2)
     @DisplayName("Two orders match - both accounts should receive dealt results")
     void testMatchDealtResults() throws Exception {
-        long buyOrderNo = 20001L, sellOrderNo = 20002L;
+        long buyOrderNo = nextOrderNo(), sellOrderNo = nextOrderNo();
         long buyAccountId = 200L, sellAccountId = 201L;
         String price = "3500.00", qty = "5.0";
 
@@ -250,7 +277,7 @@ public class MatchResultConsumerTest {
     @Test @Order(3)
     @DisplayName("Partial fill - taker gets PARTIAL_FILLED, maker gets FILLED")
     void testPartialFillResults() throws Exception {
-        long makerOrderNo = 30001L, takerOrderNo = 30002L;
+        long makerOrderNo = nextOrderNo(), takerOrderNo = nextOrderNo();
         long makerAccountId = 300L, takerAccountId = 301L;
         String price = "3600.00";
 
@@ -273,7 +300,7 @@ public class MatchResultConsumerTest {
     @DisplayName("Market order with no liquidity - should get CANCELLED result")
     void testMarketOrderNoLiquidity() throws Exception {
         warmupSymbol("XYZUSD");
-        long orderNo = 40001L, accountId = 400L;
+        long orderNo = nextOrderNo(), accountId = 400L;
         sendPlaceOrder(orderNo, accountId, "XYZUSD", "BUY_IN_SINGLE_SIDE_MODE", "MARKET", null, "1.0");
 
         List<MatchResult> results = consumeResults(Duration.ofSeconds(10));
@@ -288,7 +315,7 @@ public class MatchResultConsumerTest {
     @Test @Order(5)
     @DisplayName("IOC order unfilled - should get CANCELLED with IOC_UNFILLED reason")
     void testIOCUnfilled() throws Exception {
-        long orderNo = 50001L, accountId = 500L;
+        long orderNo = nextOrderNo(), accountId = 500L;
         sendPlaceOrder(orderNo, accountId, SYMBOL, "BUY_IN_SINGLE_SIDE_MODE", "LIMIT_IOC", "1.00", "1.0");
 
         List<MatchResult> results = consumeResults(Duration.ofSeconds(10));
@@ -303,7 +330,7 @@ public class MatchResultConsumerTest {
     @Test @Order(6)
     @DisplayName("Cancel order - should receive CANCELLED dealtOrder")
     void testCancelOrderResult() throws Exception {
-        long orderNo = 60001L, accountId = 600L;
+        long orderNo = nextOrderNo(), accountId = 600L;
         sendPlaceOrder(orderNo, accountId, SYMBOL, "BUY_IN_SINGLE_SIDE_MODE", "LIMIT", "2000.00", "1.0");
         Thread.sleep(1000);
 
@@ -322,7 +349,7 @@ public class MatchResultConsumerTest {
     @Test @Order(7)
     @DisplayName("Match creates correct averagePrice when taker eats multiple makers")
     void testAveragePriceCalculation() throws Exception {
-        long maker1 = 70001L, maker2 = 70002L, taker = 70003L;
+        long maker1 = nextOrderNo(), maker2 = nextOrderNo(), taker = nextOrderNo();
         long makerAccount1 = 701L, makerAccount2 = 702L, takerAccount = 703L;
 
         sendPlaceOrder(maker1, makerAccount1, SYMBOL, "SELL_IN_SINGLE_SIDE_MODE", "LIMIT", "2500.00", "1.0");
@@ -343,7 +370,7 @@ public class MatchResultConsumerTest {
     @Test @Order(8)
     @DisplayName("Result messages are keyed by accountId")
     void testResultKeyedByAccountId() throws Exception {
-        long buyOrderNo = 80001L, sellOrderNo = 80002L;
+        long buyOrderNo = nextOrderNo(), sellOrderNo = nextOrderNo();
         long buyAccountId = 800L, sellAccountId = 801L;
         String price = "4000.00", qty = "1.0";
 

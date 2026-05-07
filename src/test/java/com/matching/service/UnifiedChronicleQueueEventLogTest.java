@@ -106,6 +106,108 @@ public class UnifiedChronicleQueueEventLogTest {
     }
 
     @Test
+    void testReadEventsInRange() {
+        // 写入 10 个事件（seq 1-10）
+        for (int i = 1; i <= 10; i++) {
+            String symbol = i % 2 == 0 ? "ETH/USDT" : "BTC/USDT";
+            OrderBookEntry order = new OrderBookEntry();
+            order.setClientOrderId("order-" + i);
+            order.setSymbolId(symbol);
+            order.setPrice(BigDecimal.valueOf(100 + i));
+            order.setQuantity(BigDecimal.valueOf(1.0));
+            order.setSide("BUY");
+
+            long seq = eventLog.appendBatch(symbol, List.of(order), List.of(), List.of());
+            assertEquals(i, seq);
+        }
+
+        // readEventsInRange: 读取 seq 3-7
+        List<Event> range = eventLog.readEventsInRange(3, 7);
+        assertNotNull(range);
+        assertEquals(5, range.size());
+        // 验证 seq 顺序
+        for (int i = 0; i < 5; i++) {
+            assertEquals(3 + i, range.get(i).getSeq());
+        }
+
+        // 验证范围外的 seq 不在结果中
+        assertTrue(range.stream().noneMatch(e -> e.getSeq() < 3 || e.getSeq() > 7),
+                "readEventsInRange 不应返回范围外的事件");
+
+        System.out.println("✅ readEventsInRange 测试通过: " + range.size() + " events in seq range 3-7");
+    }
+
+    @Test
+    void testReadEventsInRangeWithNoMatch() {
+        // 没有事件的空范围
+        List<Event> emptyRange = eventLog.readEventsInRange(100, 200);
+        assertNotNull(emptyRange);
+        assertTrue(emptyRange.isEmpty());
+
+        System.out.println("✅ readEventsInRange 空范围测试通过");
+    }
+
+    @Test
+    void testReadEventsAfterSeq() {
+        // 写入 10 个事件（seq 1-10）
+        for (int i = 1; i <= 10; i++) {
+            OrderBookEntry order = new OrderBookEntry();
+            order.setClientOrderId("order-" + i);
+            order.setSymbolId("BTC/USDT");
+            order.setPrice(BigDecimal.valueOf(100 + i));
+            order.setQuantity(BigDecimal.valueOf(1.0));
+            order.setSide("BUY");
+
+            long seq = eventLog.appendBatch("BTC/USDT", List.of(order), List.of(), List.of());
+            assertEquals(i, seq);
+        }
+
+        // readEvents 读取 afterSeq=5 的所有事件
+        List<Event> events = eventLog.readEvents("BTC/USDT", 5);
+        assertNotNull(events);
+        // 应只返回 seq > 5 的事件（6-10）
+        assertTrue(events.stream().allMatch(e -> e.getSeq() > 5),
+                "readEvents 应只返回 seq > afterSeq 的事件");
+        assertTrue(events.stream().allMatch(e -> "BTC/USDT".equals(e.getSymbolId())),
+                "readEvents 应只返回指定 symbol 的事件");
+
+        System.out.println("✅ readEvents 过滤测试通过: " + events.size() + " events after seq 5, all seq > 5");
+    }
+
+    @Test
+    void testReadEventsForSymbolFiltering() {
+        // 交替写入 BTC/USDT 和 ETH/USDT 事件
+        for (int i = 1; i <= 8; i++) {
+            String symbol = i % 2 == 0 ? "ETH/USDT" : "BTC/USDT";
+            OrderBookEntry order = new OrderBookEntry();
+            order.setClientOrderId("order-" + i);
+            order.setSymbolId(symbol);
+            order.setPrice(BigDecimal.valueOf(100 + i));
+            order.setQuantity(BigDecimal.valueOf(1.0));
+            order.setSide("SELL");
+
+            eventLog.appendBatch(symbol, List.of(order), List.of(), List.of());
+        }
+
+        // readEventsForSymbol: 只返回指定 symbol 且 seq > afterSeq 的事件
+        List<Event> btcEvents = eventLog.readEventsForSymbol("BTC/USDT", 0);
+        assertEquals(4, btcEvents.size(), "BTC/USDT 应有 4 个事件");
+        assertTrue(btcEvents.stream().allMatch(e -> "BTC/USDT".equals(e.getSymbolId())));
+
+        List<Event> ethEvents = eventLog.readEventsForSymbol("ETH/USDT", 0);
+        assertEquals(4, ethEvents.size(), "ETH/USDT 应有 4 个事件");
+        assertTrue(ethEvents.stream().allMatch(e -> "ETH/USDT".equals(e.getSymbolId())));
+
+        // 验证排序正确
+        for (int i = 1; i < btcEvents.size(); i++) {
+            assertTrue(btcEvents.get(i).getSeq() > btcEvents.get(i - 1).getSeq(),
+                    "事件应按 seq 升序排列");
+        }
+
+        System.out.println("✅ readEventsForSymbol 跨 symbol 过滤测试通过");
+    }
+
+    @Test
     void testPerformanceImprovement() {
         // 模拟高频写入场景
         long startTime = System.nanoTime();

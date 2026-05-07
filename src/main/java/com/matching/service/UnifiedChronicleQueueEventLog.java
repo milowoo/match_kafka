@@ -6,6 +6,7 @@ import net.openhft.chronicle.queue.ChronicleQueue;
 import net.openhft.chronicle.queue.ExcerptAppender;
 import net.openhft.chronicle.queue.ExcerptTailer;
 import net.openhft.chronicle.wire.WriteMarshallable;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
@@ -86,6 +87,7 @@ public class UnifiedChronicleQueueEventLog extends EventLog {
         public long getTimestamp() { return timestamp; }
     }
 
+    @Autowired
     public UnifiedChronicleQueueEventLog(StringRedisTemplate redisTemplate) {
         super(redisTemplate);
     }
@@ -253,13 +255,13 @@ public class UnifiedChronicleQueueEventLog extends EventLog {
         List<Event> result = new ArrayList<>();
         try {
             try (ExcerptTailer readTailer = unifiedQueue.createTailer()) {
-                readTailer.moveToIndex(afterSeq + 1);
+                readTailer.toStart();
 
                 while (readTailer.readDocument(wireIn -> {
                     String type = wireIn.read("type").text();
                     if ("event".equals(type)) {
                         Event event = wireIn.read("event").object(Event.class);
-                        if (event != null && symbolId.equals(event.getSymbolId())) {
+                        if (event != null && symbolId.equals(event.getSymbolId()) && event.getSeq() > afterSeq) {
                             result.add(event);
                         }
                     }
@@ -297,6 +299,37 @@ public class UnifiedChronicleQueueEventLog extends EventLog {
         } catch (Exception e) {
             log.error("Failed to read event by seq: {}", seq, e);
             return null;
+        }
+    }
+
+    @Override
+    public List<Event> readEventsInRange(long fromSeq, long toSeq) {
+        List<Event> result = new ArrayList<>();
+        try {
+            try (ExcerptTailer readTailer = unifiedQueue.createTailer()) {
+                readTailer.toStart();
+
+                while (readTailer.readDocument(wireIn -> {
+                    String type = wireIn.read("type").text();
+                    if ("event".equals(type)) {
+                        Event event = wireIn.read("event").object(Event.class);
+                        if (event != null && event.getSeq() >= fromSeq && event.getSeq() <= toSeq) {
+                            result.add(event);
+                        }
+                    }
+                })) {
+                    // 继续读取
+                }
+            }
+
+            // 按 seq 排序确保顺序正确
+            result.sort((a, b) -> Long.compare(a.getSeq(), b.getSeq()));
+
+            log.debug("Read {} events in range [{}, {}]", result.size(), fromSeq, toSeq);
+            return result;
+        } catch (Exception e) {
+            log.error("Failed to read events in range [{}, {}]", fromSeq, toSeq, e);
+            return result;
         }
     }
 

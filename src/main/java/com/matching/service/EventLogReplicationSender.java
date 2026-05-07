@@ -1,17 +1,20 @@
 package com.matching.service;
 
 import com.matching.util.ProtoConverter;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.header.internals.RecordHeader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -30,21 +33,28 @@ public class EventLogReplicationSender {
     private final StringRedisTemplate redisTemplate;
     private final String topic;
 
+    @Value("${matching.replication.message-key:eventlog-sync}")
+    private String messageKey;
+
+    @Value("${matching.ha.instance-id:node-1}")
+    private String instanceId;
+
+    @Value("${matching.replication.redis-flush-interval:500}")
+    private int redisFlushInterval;
+
     // 发送进度跟踪
     private final AtomicLong lastSentSeq = new AtomicLong(0);
+    private final AtomicLong lastRedisFlushSeq = new AtomicLong(0);
     private volatile long startSeq = 0;
 
     // 发送线程
     private volatile boolean running = false;
     private Thread sendingThread;
 
-    // 异步Redis更新线程池
-    private final ExecutorService executorService = Executors.newSingleThreadExecutor();
-
     public EventLogReplicationSender(EventLog eventLog,
                                    KafkaTemplate<String, byte[]> kafkaTemplate,
                                    StringRedisTemplate redisTemplate,
-                                   String topic) {
+                                   @Value("${matching.kafka.topic.eventlog-sync:MATCHING_EVENTLOG_SYNC}") String topic) {
         this.eventLog = eventLog;
         this.kafkaTemplate = kafkaTemplate;
         this.redisTemplate = redisTemplate;
@@ -53,26 +63,23 @@ public class EventLogReplicationSender {
 
     @PostConstruct
     public void init() {
-        // 从Redis恢复发送进度
-        String persistedSeq = redisTemplate.opsForValue().get(SENT_SEQ_KEY);
-        if (persistedSeq != null) {
-            lastSentSeq.set(Long.parseLong(persistedSeq));
-            log.info("Restored last sent seq: {}", lastSentSeq.get());
+        try {
+            ValueOperations<String, String> valueOps = redisTemplate.opsForValue();
+            if (valueOps != null) {
+                String persistedSeq = valueOps.get(SENT_SEQ_KEY);
+                if (persistedSeq != null) {
+                    lastSentSeq.set(Long.parseLong(persistedSeq));
+                    log.info("Restored last sent seq: {}", lastSentSeq.get());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to restore last sent seq from Redis, starting from 0", e);
         }
     }
 
     @PreDestroy
     public void shutdown() {
         stopSending();
-        executorService.shutdown();
-        try {
-            if (!executorService.awaitTermination(60, TimeUnit.SECONDS)) {
-                executorService.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            executorService.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
     }
 
     /**
@@ -123,19 +130,20 @@ public class EventLogReplicationSender {
     public void sendRemainingEvents(long targetSeq) {
         log.info("Sending remaining events from {} to {}", lastSentSeq.get() + 1, targetSeq);
 
-        for (long seq = lastSentSeq.get() + 1; seq <= targetSeq; seq++) {
+        long fromSeq = lastSentSeq.get() + 1;
+        if (fromSeq > targetSeq) return;
+
+        List<EventLog.Event> events = eventLog.readEventsInRange(fromSeq, targetSeq);
+        for (EventLog.Event event : events) {
             try {
-                EventLog.Event event = readEventBySeq(seq);
-                if (event != null) {
-                    byte[] data = serializeEvent(event);
-                    kafkaTemplate.send(topic, String.valueOf(seq), data);
-                    updateLastSentSeq(seq);
-                    log.debug("Sent remaining event seq: {}", seq);
-                } else {
-                    log.warn("Event not found for seq: {}", seq);
-                }
+                byte[] data = serializeEvent(event);
+                ProducerRecord<String, byte[]> record = new ProducerRecord<>(topic, messageKey, data);
+                record.headers().add(new RecordHeader(EventLogReplicationService.HEADER_SOURCE_INSTANCE, instanceId.getBytes(StandardCharsets.UTF_8)));
+                kafkaTemplate.send(record);
+                updateLastSentSeq(event.getSeq());
+                log.debug("Sent remaining event seq: {}", event.getSeq());
             } catch (Exception e) {
-                log.error("Failed to send remaining event seq: {}", seq, e);
+                log.error("Failed to send remaining event seq: {}", event.getSeq(), e);
             }
         }
     }
@@ -156,6 +164,41 @@ public class EventLogReplicationSender {
      */
     public long getLastSentSeq() {
         return lastSentSeq.get();
+    }
+
+    /**
+     * 等待 Kafka 集群就绪（通过 partitionsFor 获取 topic metadata）
+     * 在 HA activate 过程中调用，确保复制管道就绪后才开始接受订单。
+     *
+     * @param timeoutMs 最大等待时间（毫秒）
+     * @return true 表示 Kafka 就绪，false 表示超时
+     */
+    public boolean waitForKafkaReady(long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                kafkaTemplate.partitionsFor(topic);
+                log.info("[Sender] Kafka cluster ready for topic {}", topic);
+                return true;
+            } catch (Exception e) {
+                log.debug("[Sender] Kafka not ready yet, retrying...");
+                try {
+                    Thread.sleep(200);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+        }
+        log.warn("[Sender] Kafka cluster not ready within {}ms for topic {}", timeoutMs, topic);
+        return false;
+    }
+
+    /**
+     * 检查重试队列是否为空，用于 HAService activate 时确认积压已清空
+     */
+    public boolean isRetryQueueEmpty() {
+        return eventLog.getMaxLocalSeq() <= lastSentSeq.get();
     }
 
     /**
@@ -233,49 +276,48 @@ public class EventLogReplicationSender {
         long currentCommittedSeq = eventLog.getMaxLocalSeq();
         long currentLastSentSeq = lastSentSeq.get();
 
-        // 发送从lastSentSeq+1到currentCommittedSeq的所有事件
-        for (long seq = currentLastSentSeq + 1; seq <= currentCommittedSeq; seq++) {
+        if (currentCommittedSeq <= currentLastSentSeq) return;
+
+        // 单次扫描读取所有待发送事件，避免 O(n²) 逐条查询
+        List<EventLog.Event> events = eventLog.readEventsInRange(currentLastSentSeq + 1, currentCommittedSeq);
+
+        for (EventLog.Event event : events) {
             try {
-                EventLog.Event event = readEventBySeq(seq);
-                if (event != null) {
-                    byte[] data = serializeEvent(event);
-                    kafkaTemplate.send(topic, String.valueOf(seq), data);
-                    updateLastSentSeq(seq);
-                    log.debug("Sent event seq: {}", seq);
-                } else {
-                    log.warn("Event not found for seq: {} during batch send", seq);
-                }
+                byte[] data = serializeEvent(event);
+                ProducerRecord<String, byte[]> record = new ProducerRecord<>(topic, messageKey, data);
+                record.headers().add(new RecordHeader(EventLogReplicationService.HEADER_SOURCE_INSTANCE, instanceId.getBytes(StandardCharsets.UTF_8)));
+                kafkaTemplate.send(record);
+                updateLastSentSeq(event.getSeq());
+                log.debug("Sent event seq: {}", event.getSeq());
             } catch (Exception e) {
-                log.error("Failed to send event seq: {}", seq, e);
+                log.error("Failed to send event seq: {}", event.getSeq(), e);
                 // 继续处理下一个事件
             }
         }
     }
 
     /**
-     * 更新最后发送的序列号
+     * 更新最后发送的序列号。
+     * 内存中 lastSentSeq 实时更新；Redis 每隔 redisFlushInterval 次写一次，
+     * 减少 Redis 写入压力。重启后最多重复发送 redisFlushInterval 条事件，
+     * 从实例的 appendReplicated 有 seq 幂等检查，重复发送无害。
      */
     private void updateLastSentSeq(long seq) {
         lastSentSeq.set(seq);
-        // 异步更新Redis
-        executorService.submit(() -> {
-            try {
-                redisTemplate.opsForValue().set(SENT_SEQ_KEY, String.valueOf(seq));
-            } catch (Exception e) {
-                log.warn("Failed to persist last sent seq: {}", seq, e);
-            }
-        });
-    }
 
-    /**
-     * 从EventLog中读取指定seq的事件
-     */
-    private EventLog.Event readEventBySeq(long seq) {
+        // 每 N 次才写一次 Redis
+        long lastFlush = lastRedisFlushSeq.get();
+        if (seq - lastFlush < redisFlushInterval) {
+            return;
+        }
+        if (!lastRedisFlushSeq.compareAndSet(lastFlush, seq)) {
+            return;
+        }
+
         try {
-            return eventLog.readEventBySeq(seq);
+            redisTemplate.opsForValue().set(SENT_SEQ_KEY, String.valueOf(seq));
         } catch (Exception e) {
-            log.error("Failed to read event by seq: {}", seq, e);
-            return null;
+            log.warn("Failed to persist last sent seq: {}", seq, e);
         }
     }
 

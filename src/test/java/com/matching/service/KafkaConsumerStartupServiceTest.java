@@ -38,7 +38,7 @@ class KafkaConsumerStartupServiceTest {
         ReflectionTestUtils.setField(service, "verifyCheckIntervalMs", 200L);
 
         // Mock 状态：始终未就绪
-        when(registry.isRunning()).thenReturn(false);
+        when(registry.isRunning()).thenReturn(true);
         when(monitor.getStatus()).thenReturn(new KafkaListenerMonitor.KafkaListenerStatus(false, false, 0));
 
         long startTime = System.currentTimeMillis();
@@ -57,7 +57,7 @@ class KafkaConsumerStartupServiceTest {
         ReflectionTestUtils.setField(service, "verifyCheckIntervalMs", 100L);
 
         // Mock 状态：始终未就绪
-        when(registry.isRunning()).thenReturn(false);
+        when(registry.isRunning()).thenReturn(true);
         when(monitor.getStatus()).thenReturn(new KafkaListenerMonitor.KafkaListenerStatus(false, false, 0));
 
         long startTime = System.currentTimeMillis();

@@ -161,10 +161,11 @@ class LocalStorageArchitectureTest {
         KafkaTemplate<String, byte[]> kafkaTemplate = mock(KafkaTemplate.class);
         when(kafkaTemplate.send(any(org.apache.kafka.clients.producer.ProducerRecord.class)))
                 .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(null));
-        EventLogReplicationService service = new EventLogReplicationService(kafkaTemplate);
+        EventLogReplicationService service = new EventLogReplicationService(kafkaTemplate, 100000);
         setField(service, "eventlogSyncTopic", "MATCHING_EVENTLOG_SYNC");
         setField(service, "instanceId", "node-1");
         setField(service, "sendTimeoutMs", 5000L);
+        setField(service, "messageKey", "eventlog-sync");
 
         EventLog.Event event = new EventLog.Event(42L, "BTCUSDT",
                 List.of(OrderBookEntry.builder().clientOrderId("o1").symbolId("BTCUSDT").side("BUY")
@@ -179,7 +180,7 @@ class LocalStorageArchitectureTest {
 
         ProducerRecord<String, byte[]> sent = captor.getValue();
         assertEquals("MATCHING_EVENTLOG_SYNC", sent.topic());
-        assertEquals("BTCUSDT", sent.key());
+        assertEquals("eventlog-sync", sent.key());
 
         // 验证 header 包含 sourceInstanceId
         var header = sent.headers().lastHeader(EventLogReplicationService.HEADER_SOURCE_INSTANCE);

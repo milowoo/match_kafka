@@ -56,6 +56,16 @@ public abstract class EventLog {
     public abstract Event readEventBySeq(long seq);
 
     /**
+     * 批量读取指定范围内的所有事件，单次扫描实现，避免 O(n²)。
+     * 用于 EventLogReplicationSender 批量发送。
+     *
+     * @param fromSeq 起始序列号（包含）
+     * @param toSeq   结束序列号（包含）
+     * @return 范围内的事件列表（按 seq 升序排列）
+     */
+    public abstract List<Event> readEventsInRange(long fromSeq, long toSeq);
+
+    /**
      * 读取指定交易对在指定seq之后的所有事件
      * 由于全局seq设计，同一交易对的seq可能不连续，需要过滤
      */

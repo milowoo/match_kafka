@@ -45,6 +45,9 @@ public class KafkaProducerConfig {
         props.put(ProducerConfig.ACKS_CONFIG, "all");
         props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
         props.put(ProducerConfig.MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION, 5);
+        props.put(ProducerConfig.LINGER_MS_CONFIG, 5);
+        props.put(ProducerConfig.BATCH_SIZE_CONFIG, 65536);
+        props.put(ProducerConfig.COMPRESSION_TYPE_CONFIG, "snappy");
         return new DefaultKafkaProducerFactory<>(props);
     }
 

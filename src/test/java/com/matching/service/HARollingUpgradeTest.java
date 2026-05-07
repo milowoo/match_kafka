@@ -65,11 +65,11 @@ class HARollingUpgradeTest {
         when(eventLogA.currentSeq()).thenReturn(0L);
         snapshotServiceA = new SnapshotService(eventLogA, sharedRedisTemplate);
         kafkaTemplateA = mock(KafkaTemplate.class);
-        replicationServiceA = new EventLogReplicationService(kafkaTemplateA);
+        replicationServiceA = new EventLogReplicationService(kafkaTemplateA, 100000);
         setField(replicationServiceA, "eventlogSyncTopic", "MATCHING_EVENTLOG_SYNC");
         setField(replicationServiceA, "instanceId", "node-A");
         setField(replicationServiceA, "sendTimeoutMs", 5000L);
-        setField(replicationServiceA, "maxRetries", 10);
+        setField(replicationServiceA, "messageKey", "eventlog-sync");
 
         doAnswer(inv -> {
             kafkaChannel.add(inv.getArgument(0));
@@ -118,7 +118,7 @@ class HARollingUpgradeTest {
         assertEquals(3, kafkaChannel.size());
         for (ProducerRecord<String, byte[]> sent : kafkaChannel) {
             assertEquals("MATCHING_EVENTLOG_SYNC", sent.topic());
-            assertEquals("BTCUSDT", sent.key());
+            assertEquals("eventlog-sync", sent.key());
             var header = sent.headers().lastHeader(EventLogReplicationService.HEADER_SOURCE_INSTANCE);
             assertNotNull(header);
             assertEquals("node-A", new String(header.value(), StandardCharsets.UTF_8));

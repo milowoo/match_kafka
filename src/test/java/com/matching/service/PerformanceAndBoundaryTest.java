@@ -401,6 +401,16 @@ class PerformanceAndBoundaryTest {
         }
 
         @Override
+        public List<Event> readEventsInRange(long fromSeq, long toSeq) {
+            synchronized (this) {
+                return mockEvents.stream()
+                    .filter(e -> e.getSeq() >= fromSeq && e.getSeq() <= toSeq)
+                    .sorted(java.util.Comparator.comparingLong(Event::getSeq))
+                    .collect(java.util.stream.Collectors.toList());
+            }
+        }
+
+        @Override
         public Event readEventBySeq(long seq) {
             synchronized (this) {
                 return mockEvents.stream()

@@ -5,6 +5,7 @@ import com.matching.ha.InstanceLeaderElection;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
@@ -279,6 +280,158 @@ class HAStateMachineTest {
                 "计划内 deactivate 应清除 PRIMARY 标志");
     }
 
+    // ==================== Sender 停止顺序验证（新增修复） ====================
+
+    @Test
+    @DisplayName("deactivate: 先 stopSending 再 sendRemainingEvents（消除并发竞态）")
+    void testDeactivateStopsSenderBeforeSendingRemaining() {
+        UnifiedChronicleQueueEventLog cqEventLog = mock(UnifiedChronicleQueueEventLog.class);
+        FastRecoveryService recoveryService = mock(FastRecoveryService.class);
+        SymbolConfigService symbolConfigService = mock(SymbolConfigService.class);
+        KafkaConsumerStartupService kafkaService = mock(KafkaConsumerStartupService.class);
+        SnapshotService snapshotService = mock(SnapshotService.class);
+        OrderBookService orderBookService = mock(OrderBookService.class);
+        InstanceLeaderElection leaderElection = mock(InstanceLeaderElection.class);
+        EventLogReplicationSender sender = mock(EventLogReplicationSender.class);
+
+        // 模拟有 20 个未发送事件（committedSeq=120, sentSeq=100）
+        when(cqEventLog.getMaxLocalSeq()).thenReturn(120L);
+        when(sender.getLastSentSeq()).thenReturn(100L);
+        when(sender.isRetryQueueEmpty()).thenReturn(true);
+        when(sender.waitForKafkaReady(anyLong())).thenReturn(true);
+        when(kafkaService.stopConsumers()).thenReturn(true);
+        when(kafkaService.startConsumers()).thenReturn(true);
+        when(symbolConfigService.getActiveSymbolIds()).thenReturn(Collections.emptyList());
+        when(orderBookService.getAllEngines()).thenReturn(Collections.emptyMap());
+
+        HAService ha = new HAService(redisTemplate, cqEventLog, recoveryService, symbolConfigService,
+                kafkaService, snapshotService, orderBookService, leaderElection, sender);
+        setField(ha, "instanceId", "node-1");
+        setField(ha, "haEnabled", true);
+        setField(ha, "autoFailoverEnabled", false);
+
+        // 先激活为 PRIMARY
+        ha.activate();
+        assertEquals("PRIMARY", ha.getRole());
+
+        // 执行 deactivate
+        boolean result = ha.deactivate();
+
+        // 验证 deactivate 成功
+        assertTrue(result);
+        assertEquals("STANDBY", ha.getRole());
+
+        // 验证 stopSending() 在 sendRemainingEvents() 之前调用（消除竞态）
+        InOrder inOrder = inOrder(sender);
+        inOrder.verify(sender).stopSending();
+        inOrder.verify(sender).sendRemainingEvents(120); // committedSeq
+        inOrder.verify(sender).waitForSendCompletion();
+        // 确保 sendRemainingEvents 之后不再有 stopSending 调用
+        inOrder.verifyNoMoreInteractions();
+    }
+
+    @Test
+    @DisplayName("activate 回滚时停止 Sender")
+    void testActivateRollbackStopsSender() {
+        UnifiedChronicleQueueEventLog cqEventLog = mock(UnifiedChronicleQueueEventLog.class);
+        FastRecoveryService recoveryService = mock(FastRecoveryService.class);
+        SymbolConfigService symbolConfigService = mock(SymbolConfigService.class);
+        KafkaConsumerStartupService kafkaService = mock(KafkaConsumerStartupService.class);
+        SnapshotService snapshotService = mock(SnapshotService.class);
+        OrderBookService orderBookService = mock(OrderBookService.class);
+        InstanceLeaderElection leaderElection = mock(InstanceLeaderElection.class);
+        EventLogReplicationSender sender = mock(EventLogReplicationSender.class);
+
+        // Kafka 启动失败 → activate 将抛异常走回滚路径
+        when(sender.waitForKafkaReady(anyLong())).thenReturn(false);
+        when(kafkaService.stopConsumers()).thenReturn(true);
+        when(symbolConfigService.getActiveSymbolIds()).thenReturn(Collections.emptyList());
+
+        HAService ha = new HAService(redisTemplate, cqEventLog, recoveryService, symbolConfigService,
+                kafkaService, snapshotService, orderBookService, leaderElection, sender);
+        setField(ha, "instanceId", "node-1");
+        setField(ha, "haEnabled", true);
+        setField(ha, "autoFailoverEnabled", false);
+
+        boolean result = ha.activate();
+
+        // 验证 activate 失败且回滚
+        assertFalse(result);
+        assertEquals("STANDBY", ha.getRole());
+
+        // 回滚路径应停止 sender（因为 startSending 已在步骤 4 被调用）
+        verify(sender).stopSending();
+    }
+
+    @Test
+    @DisplayName("emergencyDeactivate 停止 Sender")
+    void testEmergencyDeactivateStopsSender() {
+        UnifiedChronicleQueueEventLog cqEventLog = mock(UnifiedChronicleQueueEventLog.class);
+        FastRecoveryService recoveryService = mock(FastRecoveryService.class);
+        SymbolConfigService symbolConfigService = mock(SymbolConfigService.class);
+        KafkaConsumerStartupService kafkaService = mock(KafkaConsumerStartupService.class);
+        SnapshotService snapshotService = mock(SnapshotService.class);
+        OrderBookService orderBookService = mock(OrderBookService.class);
+        InstanceLeaderElection leaderElection = mock(InstanceLeaderElection.class);
+        EventLogReplicationSender sender = mock(EventLogReplicationSender.class);
+
+        when(sender.waitForKafkaReady(anyLong())).thenReturn(true);
+        when(kafkaService.startConsumers()).thenReturn(true);
+        when(kafkaService.stopConsumers()).thenReturn(true);
+        when(symbolConfigService.getActiveSymbolIds()).thenReturn(Collections.emptyList());
+        when(orderBookService.getAllEngines()).thenReturn(Collections.emptyMap());
+
+        HAService ha = new HAService(redisTemplate, cqEventLog, recoveryService, symbolConfigService,
+                kafkaService, snapshotService, orderBookService, leaderElection, sender);
+        setField(ha, "instanceId", "node-1");
+        setField(ha, "haEnabled", true);
+        setField(ha, "autoFailoverEnabled", false);
+
+        ha.activate();
+        assertEquals("PRIMARY", ha.getRole());
+
+        ha.emergencyDeactivate("OOM test");
+
+        // 紧急降级应停止 sender
+        verify(sender).stopSending();
+    }
+
+    @Test
+    @DisplayName("deactivate 无未发送事件时不调用 sendRemainingEvents")
+    void testDeactivateNoRemainingEvents() {
+        UnifiedChronicleQueueEventLog cqEventLog = mock(UnifiedChronicleQueueEventLog.class);
+        FastRecoveryService recoveryService = mock(FastRecoveryService.class);
+        SymbolConfigService symbolConfigService = mock(SymbolConfigService.class);
+        KafkaConsumerStartupService kafkaService = mock(KafkaConsumerStartupService.class);
+        SnapshotService snapshotService = mock(SnapshotService.class);
+        OrderBookService orderBookService = mock(OrderBookService.class);
+        InstanceLeaderElection leaderElection = mock(InstanceLeaderElection.class);
+        EventLogReplicationSender sender = mock(EventLogReplicationSender.class);
+
+        // 所有事件已发送：committedSeq = sentSeq = 100
+        when(cqEventLog.getMaxLocalSeq()).thenReturn(100L);
+        when(sender.getLastSentSeq()).thenReturn(100L);
+        when(sender.isRetryQueueEmpty()).thenReturn(true);
+        when(sender.waitForKafkaReady(anyLong())).thenReturn(true);
+        when(kafkaService.stopConsumers()).thenReturn(true);
+        when(kafkaService.startConsumers()).thenReturn(true);
+        when(symbolConfigService.getActiveSymbolIds()).thenReturn(Collections.emptyList());
+        when(orderBookService.getAllEngines()).thenReturn(Collections.emptyMap());
+
+        HAService ha = new HAService(redisTemplate, cqEventLog, recoveryService, symbolConfigService,
+                kafkaService, snapshotService, orderBookService, leaderElection, sender);
+        setField(ha, "instanceId", "node-1");
+        setField(ha, "haEnabled", true);
+        setField(ha, "autoFailoverEnabled", false);
+
+        ha.activate();
+        ha.deactivate();
+
+        // 应调用 stopSending 但不应调用 sendRemainingEvents
+        verify(sender).stopSending();
+        verify(sender, never()).sendRemainingEvents(anyLong());
+    }
+
     // ==================== Helpers ====================
 
     private HAService createHAService(String instanceId, boolean haEnabled, boolean kafkaSuccess) {
@@ -289,15 +442,17 @@ class HAStateMachineTest {
         SnapshotService snapshotService = mock(SnapshotService.class);
         OrderBookService orderBookService = mock(OrderBookService.class);
         InstanceLeaderElection leaderElection = mock(InstanceLeaderElection.class);
-        EventLogReplicationSender eventLogReplicationSender = mock(EventLogReplicationSender.class);
+        EventLogReplicationSender sender = mock(EventLogReplicationSender.class);
 
+        when(sender.waitForKafkaReady(anyLong())).thenReturn(true);
+        when(sender.isRetryQueueEmpty()).thenReturn(true);
         when(symbolConfigService.getActiveSymbolIds()).thenReturn(Collections.emptyList());
         when(kafkaService.startConsumers()).thenReturn(kafkaSuccess);
         when(kafkaService.stopConsumers()).thenReturn(true);
         when(orderBookService.getAllEngines()).thenReturn(Collections.emptyMap());
 
         HAService ha = new HAService(redisTemplate, cqEventLog, recoveryService, symbolConfigService,
-                kafkaService, snapshotService, orderBookService, leaderElection, eventLogReplicationSender);
+                kafkaService, snapshotService, orderBookService, leaderElection, sender);
         setField(ha, "instanceId", instanceId);
         setField(ha, "haEnabled", haEnabled);
         setField(ha, "autoFailoverEnabled", false);
@@ -312,8 +467,10 @@ class HAStateMachineTest {
         SnapshotService snapshotService = mock(SnapshotService.class);
         OrderBookService orderBookService = mock(OrderBookService.class);
         InstanceLeaderElection leaderElection = mock(InstanceLeaderElection.class);
-        EventLogReplicationSender eventLogReplicationSender = mock(EventLogReplicationSender.class);
+        EventLogReplicationSender sender = mock(EventLogReplicationSender.class);
 
+        when(sender.waitForKafkaReady(anyLong())).thenReturn(true);
+        when(sender.isRetryQueueEmpty()).thenReturn(true);
         when(symbolConfigService.getActiveSymbolIds()).thenReturn(Collections.emptyList());
         when(kafkaService.startConsumers()).thenAnswer(inv -> {
             Thread.sleep(200); // 模拟慢启动
@@ -323,7 +480,7 @@ class HAStateMachineTest {
         when(orderBookService.getAllEngines()).thenReturn(Collections.emptyMap());
 
         HAService ha = new HAService(redisTemplate, cqEventLog, recoveryService, symbolConfigService,
-                kafkaService, snapshotService, orderBookService, leaderElection, eventLogReplicationSender);
+                kafkaService, snapshotService, orderBookService, leaderElection, sender);
         setField(ha, "instanceId", instanceId);
         setField(ha, "haEnabled", true);
         setField(ha, "autoFailoverEnabled", false);
@@ -338,8 +495,10 @@ class HAStateMachineTest {
         SnapshotService snapshotService = mock(SnapshotService.class);
         OrderBookService orderBookService = mock(OrderBookService.class);
         InstanceLeaderElection leaderElection = mock(InstanceLeaderElection.class);
-        EventLogReplicationSender eventLogReplicationSender = mock(EventLogReplicationSender.class);
+        EventLogReplicationSender sender = mock(EventLogReplicationSender.class);
 
+        when(sender.waitForKafkaReady(anyLong())).thenReturn(true);
+        when(sender.isRetryQueueEmpty()).thenReturn(true);
         when(symbolConfigService.getActiveSymbolIds()).thenReturn(Collections.emptyList());
         when(kafkaService.startConsumers()).thenReturn(true);
         when(kafkaService.stopConsumers()).thenReturn(true);
@@ -347,7 +506,7 @@ class HAStateMachineTest {
         when(orderBookService.getAllEngines()).thenThrow(new RuntimeException("Snapshot failure"));
 
         HAService ha = new HAService(redisTemplate, cqEventLog, recoveryService, symbolConfigService,
-                kafkaService, snapshotService, orderBookService, leaderElection, eventLogReplicationSender);
+                kafkaService, snapshotService, orderBookService, leaderElection, sender);
         setField(ha, "instanceId", instanceId);
         setField(ha, "haEnabled", true);
         setField(ha, "autoFailoverEnabled", false);

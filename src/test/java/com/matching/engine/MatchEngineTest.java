@@ -153,11 +153,11 @@ public class MatchEngineTest {
     void testLoadOrdersFromDTO() {
         List<OrderBookEntry> orders = List.of(
                 OrderBookEntry.builder()
-                        .clientOrderId("1").accountId(100L).symbolId(TEST_SYMBOL)
+                        .clientOrderId("1").accountId(100L).uid(100L).symbolId(TEST_SYMBOL)
                         .side("buy").price(new BigDecimal("50000")).quantity(new BigDecimal("1.0"))
                         .remainingQuantity(new BigDecimal("0.5")).requestTime(1000L).build(),
                 OrderBookEntry.builder()
-                        .clientOrderId("2").accountId(200L).symbolId(TEST_SYMBOL)
+                        .clientOrderId("2").accountId(200L).uid(200L).symbolId(TEST_SYMBOL)
                         .side("sell").price(new BigDecimal("51000")).quantity(new BigDecimal("2.0"))
                         .remainingQuantity(new BigDecimal("2.0")).requestTime(2000L).build()
         );

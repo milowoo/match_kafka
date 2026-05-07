@@ -58,7 +58,7 @@ public class ReceiverMq {
         topics = "${matching.kafka.topic.trade}",
         groupId = "${matching.kafka.consumer.group-id}",
         containerFactory = "kafkaListenerContainerFactory",
-        autoStartup = "true"
+        autoStartup = "${matching.kafka.consumer.auto-startup:true}"
     )
     public void onMessage(ConsumerRecord<String, byte[]> record, Acknowledgment ack) {
         // 双重检查：shouldBeRunning 和 isActive 必须同时为 true 才处理

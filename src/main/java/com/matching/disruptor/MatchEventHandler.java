@@ -175,10 +175,15 @@ public class MatchEventHandler implements EventHandler<MatchEvent> {
             SyncPayload sp = cmdResult.getSyncPayload();
             String orderId = extractOrderId(event);
 
+            // 一次序列化，同时用于 EventLog 持久化和 async IO 出站，避免重复
+            Map<String, byte[]> serializedPerAccount = null;
             List<EventLog.MatchResultEntry> matchResultEntries;
             long seq = 0;
             try {
-                matchResultEntries = buildMatchResultEntries(symbolId, cmdResult.getMatchResult());
+                serializedPerAccount = resultSplitter != null
+                        ? resultSplitter.splitAndSerialize(symbolId, cmdResult.getMatchResult())
+                        : Collections.emptyMap();
+                matchResultEntries = toMatchResultEntries(serializedPerAccount);
                 seq = eventLog.appendBatch(symbolId, sp.getAddedOrders(), sp.getRemovedOrderIds(), matchResultEntries);
             } catch (Exception e) {
                 log.error("[{}] EventLog persist failed, initiating recovery, symbolId={}", symbolId, e);
@@ -196,12 +201,13 @@ public class MatchEventHandler implements EventHandler<MatchEvent> {
 
             // ====== Phase 3: Best-effort async IO ======
             final long committedSeq = seq;
-            final MatchResult matchResult = cmdResult.getMatchResult();
             final Map<String, Set<java.math.BigDecimal>> changedPriceLevels = sp.getChangedPriceLevels();
             final String committedOrderId = orderId;
             // 构建复制事件（在 Disruptor 线程捕获，避免 asyncIoExecutor 里访问已 reset 的 event）
             final EventLog.Event replicationEvent = new EventLog.Event(
                     committedSeq, symbolId, sp.getAddedOrders(), sp.getRemovedOrderIds(), matchResultEntries);
+            // 复用 Phase 1 已完成的序列化结果，避免重复 splitAndSerialize
+            final Map<String, byte[]> cachedSerialized = serializedPerAccount;
 
             asyncIoExecutor.execute(() -> {
                 // EventLog 复制给从实例
@@ -220,8 +226,8 @@ public class MatchEventHandler implements EventHandler<MatchEvent> {
                     }
                 }
 
-                // Send match results to downstream
-                List<OutboxEntry> outboxEntries = buildOutboxEntries(symbolId, matchResult);
+                // Send match results to downstream (复用 Phase 1 的序列化结果)
+                List<OutboxEntry> outboxEntries = toOutboxEntries(cachedSerialized);
                 if (!outboxEntries.isEmpty()) {
                     try {
                         resultOutboxService.sendBatch(outboxEntries, () -> {
@@ -407,19 +413,13 @@ public class MatchEventHandler implements EventHandler<MatchEvent> {
      * 异常处理：
      * - 若分割失败返回空列表（不中断处理，继续推进Phase 2）
      */
-    private List<EventLog.MatchResultEntry> buildMatchResultEntries(String symbolId, MatchResult matchResult) {
-        if (resultSplitter == null || matchResult == null) return Collections.emptyList();
-        try {
-            Map<String, byte[]> perAccount = resultSplitter.splitAndSerialize(symbolId, matchResult);
-            List<EventLog.MatchResultEntry> entries = new ArrayList<>(perAccount.size());
-            for (Map.Entry<String, byte[]> ee : perAccount.entrySet()) {
-                entries.add(new EventLog.MatchResultEntry(ee.getKey(), ee.getValue()));
-            }
-            return entries;
-        } catch (Exception e) {
-            log.error("[{}] Failed to build match result entries, symbolId={}", symbolId, e);
-            return Collections.emptyList();
+    private static List<EventLog.MatchResultEntry> toMatchResultEntries(Map<String, byte[]> perAccount) {
+        if (perAccount == null || perAccount.isEmpty()) return Collections.emptyList();
+        List<EventLog.MatchResultEntry> entries = new ArrayList<>(perAccount.size());
+        for (Map.Entry<String, byte[]> ee : perAccount.entrySet()) {
+            entries.add(new EventLog.MatchResultEntry(ee.getKey(), ee.getValue()));
         }
+        return entries;
     }
 
     /**
@@ -442,19 +442,13 @@ public class MatchEventHandler implements EventHandler<MatchEvent> {
      * 异常处理：
      * - 若分割失败返回空列表
      */
-    private List<OutboxEntry> buildOutboxEntries(String symbolId, MatchResult matchResult) {
-        if (resultSplitter == null || matchResult == null) return Collections.emptyList();
-        try {
-            Map<String, byte[]> perAccount = resultSplitter.splitAndSerialize(symbolId, matchResult);
-            List<OutboxEntry> entries = new ArrayList<>(perAccount.size());
-            for (Map.Entry<String, byte[]> ee : perAccount.entrySet()) {
-                entries.add(new OutboxEntry(ee.getKey(), ee.getValue()));
-            }
-            return entries;
-        } catch (Exception e) {
-            log.error("[{}] Failed to build outbox entries, symbolId={}", symbolId, e);
-            return Collections.emptyList();
+    private static List<OutboxEntry> toOutboxEntries(Map<String, byte[]> perAccount) {
+        if (perAccount == null || perAccount.isEmpty()) return Collections.emptyList();
+        List<OutboxEntry> entries = new ArrayList<>(perAccount.size());
+        for (Map.Entry<String, byte[]> ee : perAccount.entrySet()) {
+            entries.add(new OutboxEntry(ee.getKey(), ee.getValue()));
         }
+        return entries;
     }
 
     /**

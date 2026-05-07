@@ -67,6 +67,9 @@ public class HAService {
     @Value("${matching.ha.instance-id:node-1}")
     private String instanceId;
 
+    @Value("${matching.ha.replication-ready-timeout-ms:30000}")
+    private long replicationReadyTimeoutMs;
+
 
     public HAService(StringRedisTemplate redisTemplate,
                      UnifiedChronicleQueueEventLog eventLog,
@@ -152,20 +155,39 @@ public class HAService {
             // Step 2: 切换 EventLog 到主模式
             eventLog.switchAllToPrimary();
 
-            // Step 3: 启动 Kafka 消费
+            // Step 3: 读取全局sent-seq，从上次发送的地方继续
+            long lastSentSeq = readGlobalSentSeq();
+            eventLogReplicationSender.setStartSeq(lastSentSeq + 1);
+
+            // Step 4: 先启动 EventLog 复制发送服务（确保复制管道就绪）
+            eventLogReplicationSender.startSending();
+
+            // Step 5: 等待 Kafka 集群就绪（复制管道确认可用）
+            boolean kafkaReady = eventLogReplicationSender.waitForKafkaReady(replicationReadyTimeoutMs);
+            if (!kafkaReady) {
+                log.error("[Activate] Kafka cluster not ready within {}ms, aborting activation", replicationReadyTimeoutMs);
+                throw new RuntimeException("Kafka cluster not ready");
+            }
+
+            // Step 6: 等待重试队列积压清空（如果启动时有积压事件）
+            if (!eventLogReplicationSender.isRetryQueueEmpty()) {
+                log.info("[Activate] Waiting for replication retry queue to drain...");
+                long waitDeadline = System.currentTimeMillis() + replicationReadyTimeoutMs;
+                while (System.currentTimeMillis() < waitDeadline && !eventLogReplicationSender.isRetryQueueEmpty()) {
+                    Thread.sleep(100);
+                }
+                if (!eventLogReplicationSender.isRetryQueueEmpty()) {
+                    log.warn("[Activate] Replication retry queue not fully drained within timeout, continuing...");
+                }
+            }
+
+            // Step 7: 复制管道就绪后，再启动 Kafka 消费（开始接受订单）
             boolean kafkaStarted = kafkaConsumerStartupService.startConsumers();
             if (!kafkaStarted) {
                 throw new RuntimeException("Kafka consumer startup failed");
             }
 
-            // Step 4: 读取全局sent-seq，从上次发送的地方继续
-            long lastSentSeq = readGlobalSentSeq();
-            eventLogReplicationSender.setStartSeq(lastSentSeq + 1);
-
-            // Step 5: 启动 EventLog 复制发送服务
-            eventLogReplicationSender.startSending();
-
-            // Step 6: 切换到 PRIMARY
+            // Step 8: 切换到 PRIMARY
             role.set(Role.PRIMARY);
             leaderElection.activate();
             registerHeartbeat();
@@ -176,8 +198,9 @@ public class HAService {
 
         } catch (Exception e) {
             log.error("[Activate] Failed to activate instance {}, rolling back to STANDBY", instanceId, e);
-            // 回滚：停止已启动的 Kafka 消费，切回 STANDBY
+            // 回滚：停止已启动的 Kafka 消费和发送线程，切回 STANDBY
             try { kafkaConsumerStartupService.stopConsumers(); } catch (Exception ex) { /* ignore */ }
+            try { eventLogReplicationSender.stopSending(); } catch (Exception ex) { /* ignore */ }
             try { eventLog.switchAllToStandby(); } catch (Exception ex) { /* ignore */ }
             role.set(Role.STANDBY);
             leaderElection.completeDeactivate();
@@ -213,7 +236,10 @@ public class HAService {
                 log.warn("[Deactivate] Kafka consumers may not have stopped cleanly, continuing...");
             }
 
-            // Step 2: 检查EventLog发送完整性
+            // Step 2: 先停止后台发送线程，消除与 sendRemainingEvents 的并发竞态
+            eventLogReplicationSender.stopSending();
+
+            // Step 3: 检查EventLog发送完整性
             long committedSeq = eventLog.getMaxLocalSeq();
             long sentSeq = eventLogReplicationSender.getLastSentSeq();
 
@@ -221,12 +247,10 @@ public class HAService {
                 log.info("[Deactivate] Found unsent events: committed={}, sent={}", committedSeq, sentSeq);
 
                 // 发送剩余事件，确保从实例拥有完整数据
+                // 此时发送线程已停，无并发问题
                 eventLogReplicationSender.sendRemainingEvents(committedSeq);
                 eventLogReplicationSender.waitForSendCompletion();
             }
-
-            // Step 3: 停止发送服务
-            eventLogReplicationSender.stopSending();
 
             // Step 4: 创建最终 Snapshot（此时数据完整）
             createFinalSnapshot();
@@ -267,12 +291,19 @@ public class HAService {
             try { eventLog.switchAllToStandby(); } catch (Exception e) {
                 log.error("[Emergency] Failed to switch EventLog to standby", e);
             }
-            // Bug 修复1：停止 Kafka 消费者，防止消费者在 shouldBeRunning=false 时仍在运行导致数据丢失
+            // 停止 Kafka 消费者，防止消费者在 shouldBeRunning=false 时仍在运行导致数据丢失
             try {
                 kafkaConsumerStartupService.stopConsumers();
                 log.info("[Emergency] Kafka consumers stopped successfully");
             } catch (Exception e) {
                 log.error("[Emergency] Failed to stop Kafka consumers", e);
+            }
+            // 停止复制发送线程，避免 STANDBY 状态下继续发送事件
+            try {
+                eventLogReplicationSender.stopSending();
+                log.info("[Emergency] EventLog replication sender stopped successfully");
+            } catch (Exception e) {
+                log.error("[Emergency] Failed to stop EventLog replication sender", e);
             }
             role.set(Role.STANDBY);
             leaderElection.startDeactivate();
